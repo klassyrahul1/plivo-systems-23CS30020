@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Flaky Network - Architecture Summary</title>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; margin: 40px; max-width: 800px; }
+        h1 { color: #333; }
+        h2 { color: #555; border-bottom: 1px solid #ccc; padding-bottom: 5px; margin-top: 30px; }
+        p { margin-bottom: 15px; }
+        .author { font-style: italic; color: #666; margin-bottom: 40px; }
+    </style>
+</head>
+<body>
+    <h1>System Architecture Summary</h1>
+    <div class="author">Submitted by: Reshwik</div>
+    
+    <h2>1. Overview and Constraints</h2>
+    <p>The objective was to transmit 160-byte media frames every 20ms over a hostile UDP relay while keeping deadline misses &le; 1.00% and bandwidth overhead &le; 2.00x. The solution required decoupling the network arrival time from the strict playout deadline using a robust jitter buffer and implementing bandwidth-efficient loss recovery.</p>
+
+    <h2>2. Sender Design: Proactive FEC</h2>
+    <p>To avoid the round-trip latency penalty of NACK-based ARQ retransmissions, the sender employs a 2:1 Forward Error Correction (FEC) scheme. A custom header tracks sequence numbers and packet types. The sender transmits standard media frames, but on every odd sequence, it calculates and sends an additional FEC packet containing the bitwise XOR of the current and previous payloads. This successfully keeps bandwidth overhead at approximately 1.55x, well within the 2.00x budget.</p>
+
+    <h2>3. Receiver Design: Jitter Buffer & Playout</h2>
+    <p>The receiver utilizes a 3500-element state array as a sliding window jitter buffer. As packets arrive, they are placed into their sequence-mapped indices. If a media packet drops, the receiver instantly reconstructs it upon the arrival of its sibling and the corresponding FEC packet. A non-blocking <code>select()</code> loop continuously monitors system time, flushing buffered frames to the harness player exactly 2ms before their hard deadline to account for local socket transit latency.</p>
+</body>
+</html>

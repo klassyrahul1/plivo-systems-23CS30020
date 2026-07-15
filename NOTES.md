@@ -1,0 +1,4 @@
+The architecture utilizes a custom UDP wire format to implement a 2:1 XOR-based Forward Error Correction (FEC) scheme, balancing the 2.0x bandwidth budget with proactive loss recovery. 
+The sender caches even-numbered sequence payloads and transmits an XOR'd FEC packet on odd sequences. The receiver implements a 3500-element sliding window jitter buffer that maps sequence numbers to payload slots, rebuilding dropped packets on the fly if the FEC and sibling packets are present. 
+To handle microsecond `sendto()` system call latency, the receiver's playout loop flushes frames to the harness player 2ms prior to their absolute deadline. 
+The graded `delay_ms` is 100ms, and the system breaks if the network drops both a media packet and its associated FEC packet consecutively (burst loss), or if latency spikes consistently exceed the delay boundary.
