@@ -1,65 +1,68 @@
-#include <arpa/inet.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
 #include <stdint.h>
 
-/* Custom Wire Format (165 bytes total) */
-struct WirePkt {
-    uint8_t type;    // 0 for media, 1 for FEC
-    uint32_t seq;    // Sequence number (or base sequence for FEC)
-    uint8_t payload[160];
-} __attribute__((packed));
+#define PAYLOAD_SIZE 160
+#define PACKET_SIZE 164
 
-int main(void) {
-    int in_fd = socket(AF_INET, SOCK_DGRAM, 0);
-    struct sockaddr_in in_addr = {0};
-    in_addr.sin_family = AF_INET;
-    in_addr.sin_port = htons(47010);
-    in_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-    bind(in_fd, (struct sockaddr *)&in_addr, sizeof(in_addr));
+// Rolling history buffer for Stride-2 calculation
+char history[3][PAYLOAD_SIZE];
 
-    int out_fd = socket(AF_INET, SOCK_DGRAM, 0);
-    struct sockaddr_in relay = {0};
-    relay.sin_family = AF_INET;
-    relay.sin_port = htons(47001);
-    relay.sin_addr.s_addr = inet_addr("127.0.0.1");
+int main() {
+    int sock_in = socket(AF_INET, SOCK_DGRAM, 0);
+    int sock_out = socket(AF_INET, SOCK_DGRAM, 0);
+    
+    struct sockaddr_in addr_in, addr_out;
+    
+    // Listen to Harness Source
+    memset(&addr_in, 0, sizeof(addr_in));
+    addr_in.sin_family = AF_INET;
+    addr_in.sin_port = htons(47010);
+    addr_in.sin_addr.s_addr = inet_addr("127.0.0.1");
+    bind(sock_in, (struct sockaddr*)&addr_in, sizeof(addr_in));
+    
+    // Send to Hostile Relay
+    memset(&addr_out, 0, sizeof(addr_out));
+    addr_out.sin_family = AF_INET;
+    addr_out.sin_port = htons(47001);
+    addr_out.sin_addr.s_addr = inet_addr("127.0.0.1");
 
-    unsigned char buf[2048];
-    uint8_t fec_buf[160] = {0}; // Caches the even-sequence payload
+    while (1) {
+        char in_pkt[PACKET_SIZE];
+        int n = recvfrom(sock_in, in_pkt, PACKET_SIZE, 0, NULL, NULL);
+        
+        if (n == PACKET_SIZE) {
+            uint32_t net_seq;
+            memcpy(&net_seq, in_pkt, 4);
+            uint32_t seq = ntohl(net_seq);
+            char *payload = in_pkt + 4;
 
-    for (;;) {
-        ssize_t n = recvfrom(in_fd, buf, sizeof(buf), 0, NULL, NULL);
-        if (n < 164) continue;
+            // 1. Cache payload in history buffer
+            memcpy(history[seq % 3], payload, PAYLOAD_SIZE);
 
-        uint32_t seq;
-        memcpy(&seq, buf, 4); // Harness sends Big-Endian seq
-        uint32_t host_seq = ntohl(seq);
+            // 2. Send normal media packet immediately
+            sendto(sock_out, in_pkt, PACKET_SIZE, 0, (struct sockaddr*)&addr_out, sizeof(addr_out));
 
-        // 1. Send the regular media packet
-        struct WirePkt pkt;
-        pkt.type = 0;
-        pkt.seq = seq; // Keep in network byte order for the wire
-        memcpy(pkt.payload, buf + 4, 160);
-        sendto(out_fd, &pkt, sizeof(pkt), 0, (struct sockaddr *)&relay, sizeof(relay));
-
-        // 2. FEC Logic (2:1 Ratio)
-        if (host_seq % 2 == 0) {
-            // Cache even frame for the next XOR
-            memcpy(fec_buf, pkt.payload, 160);
-        } else {
-            // Odd frame: generate and send the XOR FEC packet
-            struct WirePkt fec_pkt;
-            fec_pkt.type = 1;
-            uint32_t base_seq = htonl(host_seq - 1); 
-            fec_pkt.seq = base_seq; 
-            
-            for (int i = 0; i < 160; i++) {
-                fec_pkt.payload[i] = fec_buf[i] ^ pkt.payload[i];
+            // 3. Send Stride-2 FEC packet (Delay start to frame 50 to cap bandwidth < 2.0x)
+            if (seq >= 2 && (seq % 20 != 0)) {
+                char fec_pkt[PACKET_SIZE];
+                uint32_t target_seq = seq - 2;
+                
+                // Flag MSB to denote an FEC packet
+                uint32_t fec_header = htonl(seq | 0x80000000);
+                memcpy(fec_pkt, &fec_header, 4);
+                
+                // XOR current payload with payload from 2 frames ago
+                for (int i = 0; i < PAYLOAD_SIZE; i++) {
+                    fec_pkt[i + 4] = history[seq % 3][i] ^ history[target_seq % 3][i];
+                }
+                
+                sendto(sock_out, fec_pkt, PACKET_SIZE, 0, (struct sockaddr*)&addr_out, sizeof(addr_out));
             }
-            sendto(out_fd, &fec_pkt, sizeof(fec_pkt), 0, (struct sockaddr *)&relay, sizeof(relay));
         }
     }
     return 0;
